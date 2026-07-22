@@ -2,6 +2,13 @@
 <html lang="he" dir="rtl">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<link rel="icon" type="image/png" href="favicon-32.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#223047">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="לו&quot;ז למידה">
 <title>לו"ז למידה - מבחן שלב א'</title>
 <style>
   :root{
@@ -182,9 +189,55 @@
   select, input{font-family:inherit;}
   .filter-row{display:flex; gap:10px; margin-bottom:12px; flex-wrap:wrap;}
   .filter-row select, .filter-row input{padding:6px 10px; border:1px solid var(--line); border-radius:7px;}
+
+  /* ============ MOBILE RESPONSIVE ============ */
+  @media (max-width: 640px){
+    #app{padding:10px 10px 40px;}
+    .hero{padding:16px 16px; border-radius:12px;}
+    .hero h1{font-size:18px;}
+    .hero .sub{font-size:12px;}
+    .hero-stats{gap:8px;}
+    .stat-card{min-width:0; flex:1 1 100%; padding:9px 12px;}
+    .stat-card .num{font-size:17px;}
+
+    .tabs{
+      flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch;
+      gap:2px; padding-bottom:2px; scrollbar-width:thin;
+    }
+    .tab-btn{flex:0 0 auto; padding:9px 12px; font-size:13px; white-space:nowrap;}
+
+    .card{padding:13px; border-radius:8px;}
+    .card h2{font-size:15.5px;}
+
+    .today-head{flex-direction:column; align-items:flex-start;}
+    .daytype-select{width:100%;}
+
+    .assign-item{padding:10px;}
+    .assign-title{font-size:13.5px;}
+    .assign-controls{width:100%;}
+    .assign-controls input[type=number]{flex:0 0 70px;}
+    .assign-controls .btn{flex:1;}
+
+    .domain-row{flex-wrap:wrap;}
+    .domain-row .bar-outer{flex:1 1 100%; order:3;}
+    .domain-tag{order:1;}
+    .domain-row .pct{order:2; margin-inline-start:auto;}
+
+    .settings-grid{grid-template-columns:1fr;}
+    .month-picker{flex-wrap:wrap;}
+
+    table{font-size:12px;}
+    .chapter-table-wrap table{min-width:640px;} /* keeps columns readable; wrapper scrolls horizontally */
+    th, td{padding:6px 8px;}
+
+    .cal-row{flex-wrap:wrap;}
+    .cal-date{min-width:0; flex:0 0 auto;}
+
+    .filter-row{flex-direction:column;}
+    .filter-row select{width:100%;}
+  }
 </style>
 <script>
-// localStorage shim mimicking Claude's window.storage API, for standalone hosting (e.g. GitHub Pages)
 window.storage = {
   get: async function(key, shared){
     const raw = localStorage.getItem(key);
