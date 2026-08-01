@@ -539,7 +539,8 @@ function simulate(maxDays=500){
   const queue = UNITS.map(u=>({...u, remaining: remainingPages(u)})).filter(u=>u.remaining>0);
   const schedule = []; // {date, type, hoursBudget, hoursUsed, assignments:[{unitKey,book,ch,name,phase,pages,kind}]}
   let qi = 0;
-  let date = START_DATE;
+  const today = todayStr();
+  let date = today > START_DATE ? today : START_DATE; // always project forward from "now", using whatever's actually left
   let dayCount = 0;
   let finishDate = null;
 
@@ -628,7 +629,8 @@ function render(){
 
   const daysLeftToFinish = (()=>{
     if(!finishDate) return null;
-    const d1 = parseLocalDate(START_DATE), d2 = parseLocalDate(finishDate);
+    const today = todayStr();
+    const d1 = parseLocalDate(today > START_DATE ? today : START_DATE), d2 = parseLocalDate(finishDate);
     return Math.round((d2-d1)/86400000);
   })();
 
@@ -637,7 +639,7 @@ function render(){
   app.innerHTML = `
     <div class="hero">
       <h1>לו"ז למידה – מבחן שלב א' (מיילדות וגניקולוגיה)</h1>
-      <div class="sub">התחלה: 1 בדצמבר 2026 · מעקב חי לפי קצב אמיתי</div>
+      <div class="sub">התחלה מתוכננת: 1 בדצמבר 2026 · התחזית תמיד מחושבת מהיום בפועל · מעקב חי לפי קצב אמיתי</div>
       <div class="hero-stats">
         <div class="stat-card">
           <div class="num">${overall.pct}%</div>
@@ -650,7 +652,7 @@ function render(){
         </div>
         <div class="stat-card">
           <div class="num">${daysLeftToFinish ?? '—'} ימים</div>
-          <div class="lbl">מ-1/12 ועד לסיום המשוער</div>
+          <div class="lbl">מהיום ועד לסיום המשוער</div>
         </div>
       </div>
     </div>
