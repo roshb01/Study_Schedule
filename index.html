@@ -349,6 +349,7 @@ let STATE = {
   dailyLog: {},       // 'YYYY-MM-DD' -> {practice:bool, anki:bool}
   syllabusManual: {}, // 'book-ch' -> bool (for syllabus chapters not tracked by the page-based plan)
   researchHours: {},  // 'YYYY-MM-DD' -> hours (0-2) dedicated to research/writing that day
+  deptExams: [],       // [{key, date:'YYYY-MM-DD', bufferDays, chapters:[{book,ch}]}] department exams during stage 1
   stage2: {
     weakChapters: [],   // [{key, book, ch, name, notePages, pagesDone}]
     examCount: null,    // planned number of practice exams (can be left blank)
@@ -400,6 +401,7 @@ function mergeIncomingState(incoming){
     dailyLog: incoming.dailyLog || {},
     syllabusManual: incoming.syllabusManual || {},
     researchHours: incoming.researchHours || {},
+    deptExams: incoming.deptExams || [],
     stage2: {
       weakChapters: (incoming.stage2 && incoming.stage2.weakChapters) || [],
       examCount: (incoming.stage2 && incoming.stage2.examCount) ?? null,
@@ -580,21 +582,16 @@ function remainingPages(u){
   return Math.max(0, u.pages - done);
 }
 
-function simulate(maxDays=500){
-  const queue = UNITS.map(u=>({...u, remaining: remainingPages(u)})).filter(u=>u.remaining>0);
-  const schedule = []; // {date, type, hoursBudget, hoursUsed, assignments:[{unitKey,book,ch,name,phase,pages,kind}]}
-  let qi = 0;
-  const today = todayStr();
-  let date = today > getStartDate() ? today : getStartDate(); // always project forward from "now", using whatever's actually left
-  let dayCount = 0;
-  let finishDate = null;
-
+// Runs the day-by-day scheduling loop for a given ordered queue of units. Shared by the normal
+// simulate() pass and the "dry run" pass used to detect department-exam scheduling conflicts.
+function runQueueSchedule(queue, startDate, maxDays){
+  const schedule = [];
+  let qi = 0, date = startDate, dayCount = 0, finishDate = null;
   while(qi < queue.length && dayCount < maxDays){
     const type = getDayType(date);
     let hoursBudget = netStudyHours(date, type);
     const assignments = [];
     let hoursUsed = 0;
-
     while(hoursBudget > 0.001 && qi < queue.length){
       const u = queue[qi];
       const rate = rateForUnit(u);
@@ -616,7 +613,6 @@ function simulate(maxDays=500){
         hoursBudget = 0;
       }
     }
-
     if(assignments.length){
       schedule.push({date, type, hoursBudget: netStudyHours(date,type), researchHours: researchHoursFor(date),
         hoursUsed, assignments});
@@ -631,6 +627,117 @@ function simulate(maxDays=500){
   if(finishDate===null && schedule.length) finishDate = schedule[schedule.length-1].date;
   return { schedule, finishDate, allDone: qi>=queue.length };
 }
+
+const DEPT_EXAM_MAX_LEAD_DAYS = 21; // "not more than 3 weeks before the exam" - avoids forgetting the material
+
+// Finds the last date a given chapter's phase-1 unit is touched, when the given ordered
+// unit array is run through the scheduler starting at startDate.
+function completionDateFor(orderedUnits, book, ch, startDate, maxDays){
+  const dry = runQueueSchedule(orderedUnits.map(u=>({...u})), startDate, maxDays);
+  let lastDate = null;
+  dry.schedule.forEach(day=>{
+    day.assignments.forEach(a=>{
+      if(a.book===book && a.ch===ch && a.phase===1) lastDate = day.date;
+    });
+  });
+  return lastDate;
+}
+
+// Places chapters tied to department exams so they finish within a target window relative to
+// the exam date: no later than (examDate - bufferDays), and no earlier than
+// (examDate - DEPT_EXAM_MAX_LEAD_DAYS) so the material stays fresh. Chapters already landing
+// inside that window under the normal ROI order are left completely untouched. Returns the
+// reordered queue plus a list of notifications describing what changed (or what couldn't be met).
+function applyDeptExamPriority(baseQueue, startDate, maxDays){
+  const exams = STATE.deptExams.filter(e=>e.date && e.chapters && e.chapters.length);
+  if(!exams.length) return {queue: baseQueue, notifications: []};
+
+  // one target window per chapter, keeping the tightest constraint if it's referenced by multiple exams
+  const pinned = {}; // "book-ch" -> {earliest, latest, examDate, book, ch}
+  exams.forEach(exam=>{
+    const latest = addDays(exam.date, -(exam.bufferDays||0));
+    const earliest = addDays(exam.date, -DEPT_EXAM_MAX_LEAD_DAYS);
+    exam.chapters.forEach(({book,ch})=>{
+      const k = book+'-'+ch;
+      if(!pinned[k] || latest < pinned[k].latest){
+        pinned[k] = {earliest, latest, examDate: exam.date, book, ch};
+      }
+    });
+  });
+  const pinnedKeys = Object.keys(pinned);
+  if(!pinnedKeys.length) return {queue: baseQueue, notifications: []};
+
+  const pinnedUnitsByKey = {};
+  baseQueue.forEach(u=>{
+    const k = u.book+'-'+u.ch;
+    if(pinned[k]) (pinnedUnitsByKey[k] = pinnedUnitsByKey[k]||[]).push(u);
+  });
+
+  // check each pinned chapter's completion date under the ORIGINAL, untouched order first -
+  // anything already landing inside its window is left exactly where it is.
+  const notifications = [];
+  const stillNeedsPlacement = [];
+  pinnedKeys.forEach(k=>{
+    const {earliest, latest, book, ch, examDate} = pinned[k];
+    const natural = completionDateFor(baseQueue, book, ch, startDate, maxDays);
+    if(natural && natural >= earliest && natural <= latest){
+      notifications.push({book, ch, examDate, status:'ok-untouched', date: natural});
+    } else {
+      stillNeedsPlacement.push(k);
+    }
+  });
+
+  if(!stillNeedsPlacement.length) return {queue: baseQueue, notifications};
+
+  let restUnits = baseQueue.filter(u=> !stillNeedsPlacement.includes(u.book+'-'+u.ch));
+
+  // process most urgent (soonest deadline) first, so they claim their ideal slot before looser ones
+  stillNeedsPlacement.sort((a,b)=> pinned[a].latest < pinned[b].latest ? -1 : 1);
+
+  stillNeedsPlacement.forEach(k=>{
+    const {earliest, latest, book, ch, examDate} = pinned[k];
+    const units = pinnedUnitsByKey[k];
+
+    // binary search for the LATEST insertion index that still meets the deadline
+    // (pushes it as close to `latest` as possible, avoiding needless earliness)
+    let lo = 0, hi = restUnits.length, best = -1;
+    while(lo <= hi){
+      const mid = Math.floor((lo+hi)/2);
+      const trial = [...restUnits.slice(0,mid), ...units, ...restUnits.slice(mid)];
+      const cd = completionDateFor(trial, book, ch, startDate, maxDays);
+      if(cd && cd <= latest){ best = mid; lo = mid+1; }
+      else { hi = mid-1; }
+    }
+
+    if(best === -1){
+      // can't meet the deadline even inserted at the very front - insert at front anyway (best effort)
+      restUnits = [...units, ...restUnits];
+      const cd = completionDateFor(restUnits, book, ch, startDate, maxDays);
+      notifications.push({book, ch, examDate, status:'deadline-at-risk', date: cd, latest});
+    } else {
+      restUnits = [...restUnits.slice(0,best), ...units, ...restUnits.slice(best)];
+      const cd = completionDateFor(restUnits, book, ch, startDate, maxDays);
+      if(cd && cd < earliest){
+        notifications.push({book, ch, examDate, status:'moved-still-early', date: cd, earliest});
+      } else {
+        notifications.push({book, ch, examDate, status:'moved-ok', date: cd});
+      }
+    }
+  });
+
+  return {queue: restUnits, notifications};
+}
+
+function simulate(maxDays=500){
+  const today = todayStr();
+  const startDate = today > getStartDate() ? today : getStartDate(); // always project forward from "now"
+  const baseQueue = UNITS.map(u=>({...u, remaining: remainingPages(u)})).filter(u=>u.remaining>0);
+  const {queue: orderedQueue, notifications} = applyDeptExamPriority(baseQueue, startDate, maxDays);
+  const result = runQueueSchedule(orderedQueue, startDate, maxDays);
+  result.deptExamNotifications = notifications;
+  return result;
+}
+
 
 /* ============================================================
    PROGRESS CALCULATIONS
@@ -857,6 +964,7 @@ function render(){
       <button class="tab-btn" data-tab="progress">התקדמות</button>
       <button class="tab-btn" data-tab="chapters">כל הפרקים</button>
       <button class="tab-btn" data-tab="syllabus">סילבוס - צ'ק ליסט</button>
+      <button class="tab-btn" data-tab="deptexams">מבחני מחלקה</button>
       <button class="tab-btn" data-tab="stage2">שלב 2 - סימולציות</button>
       <button class="tab-btn" data-tab="settings">הגדרות קצב</button>
     </div>
@@ -875,6 +983,7 @@ function render(){
   else if(ACTIVE_TAB==='progress') panels.appendChild(renderProgress());
   else if(ACTIVE_TAB==='chapters') panels.appendChild(renderChapters());
   else if(ACTIVE_TAB==='syllabus') panels.appendChild(renderSyllabus());
+  else if(ACTIVE_TAB==='deptexams') panels.appendChild(renderDeptExams());
   else if(ACTIVE_TAB==='stage2') panels.appendChild(renderStage2());
   else if(ACTIVE_TAB==='settings') panels.appendChild(renderSettings());
 }
@@ -1426,6 +1535,129 @@ function renderSyllabus(){
 
 /* ---------- SETTINGS TAB ---------- */
 /* ---------- STAGE 2 TAB ---------- */
+/* ---------- DEPARTMENT EXAMS TAB ---------- */
+function renderDeptExams(){
+  const wrap = el(`<div class="tab-panel active"></div>`);
+
+  const noteCard = el(`
+    <div class="card">
+      <h2>מבחני מחלקה</h2>
+      <div class="hint">
+        מבחני מחלקה במהלך שלב 1 (בד"כ כל כמה חודשים, על פרק אחד מכל ספר). הזן את התאריך והפרקים -
+        הכלי יבדוק מתי הפרקים האלה צפויים להילמד לפי הסדר הרגיל, ויזיז אותם בדיוק כמה שצריך (לא יותר):
+        קדימה אם יש סיכון שיילמדו מאוחר מדי, או אחורה אם הם היו נלמדים מוקדם מדי (יותר מ-3 שבועות לפני המבחן) -
+        כדי שלא תשכח אותם עד המבחן. פרק שכבר נמצא בטווח הנכון לא זז בכלל.
+      </div>
+    </div>
+  `);
+
+  const addCard = el(`
+    <div class="card">
+      <h2>הוספת מבחן מחלקה</h2>
+      <div class="settings-grid">
+        <div class="setting-item"><label>תאריך המבחן</label><input type="date" id="de-date"/></div>
+        <div class="setting-item"><label>ימים לתרגול שאלות לפני המבחן</label><input type="number" min="0" id="de-buffer" value="5"/></div>
+      </div>
+      <div class="settings-grid" style="margin-top:10px">
+        <div class="setting-item"><label>פרק ממיילדות (Gabbe)</label><select id="de-gabbe"><option value="">— אין —</option></select></div>
+        <div class="setting-item"><label>פרק מגניקולוגיה (Novak)</label><select id="de-novak"><option value="">— אין —</option></select></div>
+        <div class="setting-item"><label>פרק מפוריות (Speroff)</label><select id="de-speroff"><option value="">— אין —</option></select></div>
+      </div>
+      <div style="margin-top:12px"><button class="btn" id="de-add">הוסף מבחן</button></div>
+    </div>
+  `);
+  ['Gabbe','Novak','Speroff'].forEach(book=>{
+    const sel = addCard.querySelector(`#de-${book.toLowerCase()}`);
+    const chapters = CHAPTERS_RAW.filter(c=>c.book===book).sort((a,b)=>a.ch-b.ch);
+    chapters.forEach(c=>{
+      sel.appendChild(el(`<option value="${c.ch}">${c.ch}. ${c.name}</option>`));
+    });
+  });
+
+  addCard.querySelector('#de-add').onclick = ()=>{
+    const date = addCard.querySelector('#de-date').value;
+    if(!date) return;
+    const bufferDays = Math.max(0, Number(addCard.querySelector('#de-buffer').value)||0);
+    const chapters = [];
+    [['Gabbe','de-gabbe'],['Novak','de-novak'],['Speroff','de-speroff']].forEach(([book,id])=>{
+      const v = addCard.querySelector('#'+id).value;
+      if(v) chapters.push({book, ch:Number(v)});
+    });
+    if(!chapters.length) return;
+    STATE.deptExams.push({key:'de-'+Date.now(), date, bufferDays, chapters});
+    saveState(); render();
+  };
+
+  const listCard = el(`
+    <div class="card">
+      <h2>מבחני מחלקה שהוזנו (${STATE.deptExams.length})</h2>
+      <div class="assign-list" id="de-list"></div>
+    </div>
+  `);
+  const list = listCard.querySelector('#de-list');
+  if(!STATE.deptExams.length){
+    list.appendChild(el(`<div class="empty-note">עדיין לא הוזנו מבחני מחלקה.</div>`));
+  }
+  [...STATE.deptExams].sort((a,b)=> a.date<b.date?-1:1).forEach(exam=>{
+    const chapText = exam.chapters.map(c=>{
+      const meta = BOOK_META[c.book];
+      const cd = CHAPTERS_RAW.find(x=>x.book===c.book && x.ch===c.ch);
+      return `<span class="pill" style="background:${meta.bg};color:${meta.color}">${meta.label} ${c.ch}${cd?': '+cd.name:''}</span>`;
+    }).join(' ');
+    const item = el(`
+      <div class="assign-item">
+        <div class="assign-top">
+          <div>
+            <span class="assign-title">מבחן ${dayLabel(exam.date)} (${exam.date})</span>
+          </div>
+          <div class="assign-meta">חייב להסתיים עד ${exam.bufferDays} ימים לפני</div>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">${chapText}</div>
+        <div class="assign-controls"><button class="btn small secondary" data-key="${exam.key}">הסר מבחן</button></div>
+      </div>
+    `);
+    item.querySelector('button').onclick = ()=>{
+      STATE.deptExams = STATE.deptExams.filter(e=>e.key!==exam.key);
+      saveState(); render();
+    };
+    list.appendChild(item);
+  });
+
+  const statusCard = el(`<div class="card"><h2>סטטוס שיבוץ</h2><div id="de-status"></div></div>`);
+  const statusDiv = statusCard.querySelector('#de-status');
+  if(!STATE.deptExams.length){
+    statusDiv.appendChild(el(`<div class="empty-note">הוסף מבחן כדי לראות כאן איך הפרקים שובצו.</div>`));
+  } else {
+    const {deptExamNotifications} = simulate();
+    const STATUS_META = {
+      'ok-untouched': {icon:'✅', color:'var(--ok)', text:d=>`כבר בטווח הנכון, לא הוזז - צפוי להסתיים ${d}`},
+      'moved-ok': {icon:'↗️', color:'var(--navy)', text:d=>`הוזז כדי להתאים לחלון - צפוי להסתיים ${d}`},
+      'moved-still-early': {icon:'ℹ️', color:'var(--gold)', text:d=>`הוזז מאוחר ככל האפשר, אבל עדיין מוקדם יחסית (מסתיים ${d}) - זה קורה כשהמבחן רחוק משמעותית מסיום שלב 1; מומלץ לחזור על הפרק שוב סמוך למבחן`},
+      'deadline-at-risk': {icon:'🔴', color:'var(--warn)', text:d=>`הוזז לתחילת התור אך עדיין בסיכון לאיחור (צפוי ${d}) - יש יותר מדי חומר דחוף במקביל; שקול להוסיף שעות למידה או לצמצם`},
+    };
+    deptExamNotifications.forEach(n=>{
+      const meta = BOOK_META[n.book];
+      const sm = STATUS_META[n.status];
+      const cd = CHAPTERS_RAW.find(x=>x.book===n.book && x.ch===n.ch);
+      statusDiv.appendChild(el(`
+        <div class="assign-item" style="flex-direction:row; align-items:center; gap:10px;">
+          <span style="font-size:18px">${sm.icon}</span>
+          <div>
+            <span class="pill" style="background:${meta.bg};color:${meta.color}">${meta.label} ${n.ch}${cd?': '+cd.name:''}</span>
+            <div class="assign-meta" style="color:${sm.color}">${sm.text(n.date ? parseLocalDate(n.date).toLocaleDateString('he-IL',{day:'numeric',month:'long'}) : '—')}</div>
+          </div>
+        </div>
+      `));
+    });
+  }
+
+  wrap.appendChild(noteCard);
+  wrap.appendChild(addCard);
+  wrap.appendChild(listCard);
+  wrap.appendChild(statusCard);
+  return wrap;
+}
+
 function renderStage2(){
   const wrap = el(`<div class="tab-panel active"></div>`);
   const st2 = STATE.stage2;
