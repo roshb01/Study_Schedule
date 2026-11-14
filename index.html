@@ -345,6 +345,7 @@ const DEFAULT_SETTINGS = {
 let STATE = {
   settings: {...DEFAULT_SETTINGS},
   unitProgress: {},   // unitKey -> pages completed
+  entryLog: [],       // [{id,ts,date,scope,key,label,delta}] every progress change, for undo
   dayOverrides: {},   // 'YYYY-MM-DD' -> 'regular'|'oncall'|'after'
   dailyLog: {},       // 'YYYY-MM-DD' -> {practice:bool, anki:bool}
   syllabusManual: {}, // 'book-ch' -> bool (for syllabus chapters not tracked by the page-based plan)
@@ -397,6 +398,7 @@ function mergeIncomingState(incoming){
   STATE = { ...STATE, ...incoming,
     settings: {...DEFAULT_SETTINGS, ...(incoming.settings||{})},
     unitProgress: incoming.unitProgress || {},
+    entryLog: incoming.entryLog || [],
     dayOverrides: incoming.dayOverrides || {},
     dailyLog: incoming.dailyLog || {},
     syllabusManual: incoming.syllabusManual || {},
@@ -438,6 +440,66 @@ function saveState(){
     catch(e){ console.error('save failed', e); }
     pushToGist().catch(()=>{}); // fire-and-forget; no-op if sync isn't configured
   }, 250);
+}
+
+/* ============================================================
+   PROGRESS ENTRY LOG + SAFE ENTRY (prevents accidental double entry)
+   ============================================================ */
+function unitTotal(key){ const u=UNITS.find(x=>x.key===key); return u?u.pages:Infinity; }
+function logEntry(scope,key,label,from,to){
+  if(!STATE.entryLog) STATE.entryLog=[];
+  STATE.entryLog.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,5), ts:Date.now(), date:todayStr(), scope, key, label, delta:to-from});
+  if(STATE.entryLog.length>500) STATE.entryLog.splice(0, STATE.entryLog.length-500);
+}
+function s1Label(key){ const u=UNITS.find(x=>x.key===key); return u? `${BOOK_META[u.book].label} פרק ${u.ch}` : key; }
+function applyS1(key,newVal){
+  const old=STATE.unitProgress[key]||0;
+  const v=Math.max(0,Math.min(unitTotal(key),Number(newVal)||0));
+  if(v===old) return false;
+  STATE.unitProgress[key]=v; logEntry('s1',key,s1Label(key),old,v); return true;
+}
+function applyS2(w,newVal){
+  const old=w.pagesDone||0;
+  const v=Math.max(0,Math.min(w.notePages,Number(newVal)||0));
+  if(v===old) return false;
+  w.pagesDone=v; logEntry('s2',w.key,`${BOOK_META[w.book].label} פרק ${w.ch}`,old,v);
+  stage2LogSnapshot(); return true;
+}
+// asks for confirmation when a single entry looks suspiciously large compared with the plan
+function confirmEntry(label,from,to,planned){
+  const delta=to-from;
+  if(delta<=0) return true;
+  if(delta>Math.max(30,(planned||0)*1.5)){
+    return confirm(`${label}: הוספת ${delta} עמודים בבת אחת (מ-${from} ל-${to}).\nהמתוכנן להיום: ${planned||0}.\nלאשר?`);
+  }
+  return true;
+}
+function undoEntry(id){
+  const i=(STATE.entryLog||[]).findIndex(e=>e.id===id); if(i<0) return;
+  const e=STATE.entryLog[i];
+  if(e.scope==='s1'){
+    STATE.unitProgress[e.key]=Math.max(0,Math.min(unitTotal(e.key),(STATE.unitProgress[e.key]||0)-e.delta));
+  } else {
+    const w=STATE.stage2.weakChapters.find(x=>x.key===e.key);
+    if(w){ w.pagesDone=Math.max(0,Math.min(w.notePages,(w.pagesDone||0)-e.delta)); }
+  }
+  STATE.entryLog.splice(i,1);
+  if(e.scope==='s2') stage2LogSnapshot();
+  saveState(); render();
+}
+function renderEntryLogCard(){
+  const today=todayStr();
+  const items=(STATE.entryLog||[]).filter(e=>e.date===today).slice().reverse();
+  const card=el(`<div class="card"><h2>הזנות של היום</h2><div class="hint">טעית? לחץ "בטל" כדי להחזיר את ההזנה.</div><div class="assign-list" id="entry-log"></div></div>`);
+  const box=card.querySelector('#entry-log');
+  if(!items.length){ box.appendChild(el(`<div class="empty-note">עוד לא הוזנו עמודים היום.</div>`)); return card; }
+  items.forEach(e=>{
+    const t=new Date(e.ts); const hh=String(t.getHours()).padStart(2,'0')+':'+String(t.getMinutes()).padStart(2,'0');
+    const row=el(`<div class="assign-item"><div class="assign-controls"><span style="font-size:13px">${hh} · ${e.label} · <b>${e.delta>0?'+':''}${e.delta}</b> עמ'</span><button class="btn small secondary" style="margin-inline-start:auto">בטל</button></div></div>`);
+    row.querySelector('button').onclick=()=>undoEntry(e.id);
+    box.appendChild(row);
+  });
+  return card;
 }
 
 /* ============================================================
@@ -1068,9 +1130,9 @@ function renderToday(schedule){
           <div class="assign-meta">ROI ${a.roi} · ${phaseLabel} · מתוכנן: ${a.pages} עמ'</div>
         </div>
         <div class="assign-controls">
-          <label style="font-size:12.5px;color:var(--ink-soft)">עמודים שהספקת בפועל:</label>
-          <input type="number" min="0" value="${done}" data-unit="${a.unitKey}" class="progress-input"/>
-          <button class="btn small mark-done" data-unit="${a.unitKey}" data-pages="${done + a.pages}">סמנתי כהושלם</button>
+          <label style="font-size:12.5px;color:var(--ink-soft)">סה"כ עמודים שקראת בפרק (מצטבר, לא להיום בלבד): ${done} מתוך ${unitTotal(a.unitKey)}</label>
+          <input type="number" min="0" max="${unitTotal(a.unitKey)}" value="${done}" data-unit="${a.unitKey}" data-planned="${a.pages}" class="progress-input"/>
+          <button class="btn small mark-done" data-unit="${a.unitKey}" data-pages="${a.pages}">סמנתי שהשלמתי את המתוכנן (+${a.pages})</button>
         </div>
       </div>
     `);
@@ -1080,19 +1142,31 @@ function renderToday(schedule){
   list.querySelectorAll('.progress-input').forEach(inp=>{
     inp.onchange = (e)=>{
       const key = e.target.dataset.unit;
-      const v = Math.max(0, Number(e.target.value)||0);
-      STATE.unitProgress[key] = v;
+      const old = STATE.unitProgress[key]||0;
+      const v = Math.max(0, Math.min(unitTotal(key), Number(e.target.value)||0));
+      if(!confirmEntry(s1Label(key), old, v, Number(e.target.dataset.planned)||0)){ render(); return; }
+      applyS1(key, v);
       saveState(); render();
     };
   });
   list.querySelectorAll('.mark-done').forEach(btn=>{
     btn.onclick = (e)=>{
-      const key = e.target.dataset.unit;
-      const v = Number(e.target.dataset.pages);
-      STATE.unitProgress[key] = v;
+      const btn = e.currentTarget;
+      const key = btn.dataset.unit;
+      const add = Number(btn.dataset.pages)||0;
+      const old = STATE.unitProgress[key]||0;
+      const v = Math.min(unitTotal(key), old + add);
+      const already = (STATE.entryLog||[]).some(x=>x.date===todayStr() && x.key===key && x.scope==='s1');
+      const msg = already
+        ? `${s1Label(key)}: כבר הזנת עמודים בפרק הזה היום. להוסיף עוד ${v-old} עמ' (סה"כ ${v})?`
+        : `${s1Label(key)}: להוסיף ${v-old} עמ' (סה"כ ${v})?`;
+      if(v===old || !confirm(msg)) return;
+      applyS1(key, v);
       saveState(); render();
     };
   });
+
+  card.appendChild(renderEntryLogCard());
 
   const log = STATE.dailyLog[day.date] || {practice:false, anki:false};
   const fixedCard = el(`
@@ -1186,20 +1260,21 @@ function renderTodayStage2(){
           <div class="assign-meta">מתוכנן להיום: ${a.pages} עמ' · מתוך ${w.notePages} עמ' סה"כ</div>
         </div>
         <div class="assign-controls">
-          <label style="font-size:12.5px;color:var(--ink-soft)">סה"כ עמודים שהספקת (מצטבר):</label>
+          <label style="font-size:12.5px;color:var(--ink-soft)">סה"כ עמודים שהספקת (מצטבר, לא להיום בלבד): ${w.pagesDone} מתוך ${w.notePages}</label>
           <input type="number" min="0" max="${w.notePages}" value="${w.pagesDone}" class="s2today-input" data-key="${w.key}"/>
         </div>
       </div>
     `);
     item.querySelector('.s2today-input').onchange = (e)=>{
       const v = Math.max(0, Math.min(w.notePages, Number(e.target.value)||0));
-      w.pagesDone = v;
-      stage2LogSnapshot();
+      if(!confirmEntry(`${BOOK_META[w.book].label} פרק ${w.ch}`, w.pagesDone||0, v, a.pages)){ render(); return; }
+      applyS2(w, v);
       saveState(); render();
     };
     list.appendChild(item);
   });
 
+  card.appendChild(renderEntryLogCard());
   wrap.appendChild(card);
 
   // keep the daily fixed tasks (practice + anki) visible here too
@@ -1742,8 +1817,8 @@ function renderStage2(){
     `);
     item.querySelector('.s2-progress-input').onchange = (e)=>{
       const v = Math.max(0, Math.min(w.notePages, Number(e.target.value)||0));
-      w.pagesDone = v;
-      stage2LogSnapshot();
+      if(!confirmEntry(`${BOOK_META[w.book].label} פרק ${w.ch}`, w.pagesDone||0, v, 0)){ render(); return; }
+      applyS2(w, v);
       saveState(); render();
     };
     item.querySelector('button').onclick = ()=>{
