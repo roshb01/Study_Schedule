@@ -1054,13 +1054,17 @@ function renderCore(){
 /* ---------- TODAY TAB ---------- */
 
 /* ---------- RETROACTIVE LOGGING (stage 1) ---------- */
-const RETRO = {date:null, unitKey:null};
+const RETRO = {date:null, unitKey:null, book:null};
 function renderRetroCard(noList){
   const today=todayStr();
   if(!RETRO.date) RETRO.date=addDays(today,-1);
-  const units=UNITS.filter(u=>u.phase===1);
-  if(!RETRO.unitKey) RETRO.unitKey=units[0].key;
-  const opts=units.map(u=>{const d=STATE.unitProgress[u.key]||0;return `<option value="${u.key}" ${u.key===RETRO.unitKey?'selected':''}>${BOOK_META[u.book].label} פרק ${u.ch}: ${u.name} (${d}/${u.pages})</option>`;}).join('');
+  const books=Object.keys(BOOK_META);
+  const curU=UNITS.find(u=>u.key===RETRO.unitKey);
+  if(!RETRO.book) RETRO.book=curU?curU.book:books[0];
+  const units=UNITS.filter(u=>u.phase===1 && u.book===RETRO.book).sort((a,b)=>a.ch-b.ch);
+  if(!units.find(u=>u.key===RETRO.unitKey)) RETRO.unitKey=units[0].key;
+  const bookOpts=books.map(b=>`<option value="${b}" ${b===RETRO.book?'selected':''}>${BOOK_META[b].label}</option>`).join('');
+  const opts=units.map(u=>{const d=STATE.unitProgress[u.key]||0;const mark=d>=u.pages?'✓ ':(d>0?'◐ ':'');return `<option value="${u.key}" ${u.key===RETRO.unitKey?'selected':''}>${mark}פרק ${u.ch}: ${u.name} (${d}/${u.pages})</option>`;}).join('');
   const log=STATE.dailyLog[RETRO.date]||{};
   const card=el(`
     <div class="card">
@@ -1068,6 +1072,7 @@ function renderRetroCard(noList){
       <div class="hint">שכחת לתעד יום קודם? בחר תאריך, פרק וכמה עמודים קראת באותו יום. העמודים מתווספים להתקדמות והתוכנית מתעדכנת.</div>
       <div class="assign-controls" style="flex-wrap:wrap;gap:8px">
         <input type="date" id="retro-date" value="${RETRO.date}" max="${today}"/>
+        <select id="retro-book">${bookOpts}</select>
         <select id="retro-unit" style="max-width:100%">${opts}</select>
         <input type="number" id="retro-pages" min="1" placeholder="עמודים באותו יום" style="width:130px"/>
         <button class="btn small" id="retro-add">הוסף</button>
@@ -1078,6 +1083,7 @@ function renderRetroCard(noList){
       </div>
     </div>`);
   card.querySelector('#retro-date').onchange=e=>{ RETRO.date=e.target.value||RETRO.date; render(); };
+  card.querySelector('#retro-book').onchange=e=>{ RETRO.book=e.target.value; RETRO.unitKey=null; fillOrRender(); };
   card.querySelector('#retro-unit').onchange=e=>{ RETRO.unitKey=e.target.value; };
   card.querySelector('#retro-add').onclick=()=>{
     const key=card.querySelector('#retro-unit').value;
@@ -1100,10 +1106,36 @@ function renderRetroCard(noList){
 
 /* ---------- PROGRESS MODAL: retro logging + entry history/deletion ---------- */
 let PROGMODAL=false;
+function fillOrRender(){ if(PROGMODAL) fillProgressModal(); else render(); }
+
+function renderEditProgressCard(){
+  const card=el(`<div class="card"><h2>עריכת התקדמות קיימת לפי פרק</h2><div class="hint">כאן אפשר לתקן כל הזנה ישנה: משנים את הסה"כ המצטבר בפרק, או מאפסים. כל שינוי נרשם ביומן וניתן לביטול.</div><div id="edit-prog"></div></div>`);
+  const host=card.querySelector('#edit-prog');
+  let any=false;
+  Object.keys(BOOK_META).forEach(b=>{
+    const us=UNITS.filter(u=>u.book===b && (STATE.unitProgress[u.key]||0)>0).sort((x,y)=>x.phase-y.phase||x.ch-y.ch);
+    if(!us.length) return; any=true;
+    const det=el(`<details open style="margin-top:8px"><summary style="cursor:pointer;font-weight:700">${BOOK_META[b].label} (${us.length} פרקים)</summary><div class="assign-list"></div></details>`);
+    const list=det.querySelector('.assign-list');
+    us.forEach(u=>{
+      const d=STATE.unitProgress[u.key]||0;
+      const row=el(`<div class="assign-item"><div class="assign-controls" style="flex-wrap:wrap;gap:8px"><span style="font-size:13px">פרק ${u.ch}: ${u.name}${u.phase===2?' (חזרה)':''}</span><span style="margin-inline-start:auto"></span><input type="number" min="0" max="${u.pages}" value="${d}" style="width:80px"/><span style="font-size:12.5px">/ ${u.pages}</span><button class="btn small secondary">אפס</button></div></div>`);
+      const inp=row.querySelector('input');
+      inp.onchange=()=>{ applyS1(u.key,inp.value); saveState(); render(); };
+      row.querySelector('button').onclick=()=>{ if(confirm(`לאפס את ההתקדמות ב${s1Label(u.key)}?`)){ applyS1(u.key,0); saveState(); render(); } };
+      list.appendChild(row);
+    });
+    host.appendChild(det);
+  });
+  if(!any) host.appendChild(el(`<div class="empty-note">עוד לא הוזנה התקדמות בפרקים.</div>`));
+  return card;
+}
+
 function fillProgressModal(){
   const box=document.getElementById('prog-modal-body'); if(!box) return;
   box.innerHTML='';
   box.appendChild(renderRetroCard(true));
+  box.appendChild(renderEditProgressCard());
   const all=(STATE.entryLog||[]).slice().sort((a,b)=>b.ts-a.ts).slice(0,200);
   const hist=el(`<div class="card"><h2>היסטוריית הזנות</h2><div class="hint">לחץ "מחק" כדי להחזיר הזנה (מהיום או מימים קודמים).</div><div class="assign-list" id="hist-list"></div></div>`);
   const hl=hist.querySelector('#hist-list');
