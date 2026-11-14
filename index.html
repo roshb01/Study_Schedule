@@ -1245,8 +1245,9 @@ function renderToday(schedule){
           <div class="assign-meta">ROI ${a.roi} · ${phaseLabel} · מתוכנן: ${a.pages} עמ'</div>
         </div>
         <div class="assign-controls">
-          <label style="font-size:12.5px;color:var(--ink-soft)">סה"כ עמודים שקראת בפרק (מצטבר, לא להיום בלבד): ${done} מתוך ${unitTotal(a.unitKey)}</label>
-          <input type="number" min="0" max="${unitTotal(a.unitKey)}" value="${done}" data-unit="${a.unitKey}" data-planned="${a.pages}" class="progress-input"/>
+          <label style="font-size:12.5px;color:var(--ink-soft)">נקרא עד כה: <b>${done}</b> מתוך ${unitTotal(a.unitKey)} · כמה עמודים קראת עכשיו?</label>
+          <input type="number" placeholder="עמ'" style="width:80px" data-unit="${a.unitKey}" data-planned="${a.pages}" class="progress-input"/>
+          <button class="btn small add-pages" data-unit="${a.unitKey}">הוסף</button>
           <button class="btn small mark-done" data-unit="${a.unitKey}" data-pages="${a.pages}">סמנתי שהשלמתי את המתוכנן (+${a.pages})</button>
         </div>
       </div>
@@ -1255,14 +1256,22 @@ function renderToday(schedule){
   });
 
   list.querySelectorAll('.progress-input').forEach(inp=>{
-    inp.onchange = (e)=>{
-      const key = e.target.dataset.unit;
+    const submit = ()=>{
+      const key = inp.dataset.unit;
+      const add = Math.round(Number(inp.value)||0);
+      if(!add) return;
       const old = STATE.unitProgress[key]||0;
-      const v = Math.max(0, Math.min(unitTotal(key), Number(e.target.value)||0));
-      if(!confirmEntry(s1Label(key), old, v, Number(e.target.dataset.planned)||0)){ render(); return; }
+      const v = Math.max(0, Math.min(unitTotal(key), old + add));
+      if(v===old){ inp.value=''; return; }
+      if(!confirmEntry(s1Label(key), old, v, Number(inp.dataset.planned)||0)){ inp.value=''; return; }
       applyS1(key, v);
       saveState(); render();
     };
+    inp._submit = submit;
+    inp.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); submit(); } });
+  });
+  list.querySelectorAll('.add-pages').forEach(btn=>{
+    btn.onclick = ()=>{ const inp = btn.parentElement.querySelector('.progress-input'); inp._submit(); };
   });
   list.querySelectorAll('.mark-done').forEach(btn=>{
     btn.onclick = (e)=>{
@@ -1375,17 +1384,25 @@ function renderTodayStage2(){
           <div class="assign-meta">מתוכנן להיום: ${a.pages} עמ' · מתוך ${w.notePages} עמ' סה"כ</div>
         </div>
         <div class="assign-controls">
-          <label style="font-size:12.5px;color:var(--ink-soft)">סה"כ עמודים שהספקת (מצטבר, לא להיום בלבד): ${w.pagesDone} מתוך ${w.notePages}</label>
-          <input type="number" min="0" max="${w.notePages}" value="${w.pagesDone}" class="s2today-input" data-key="${w.key}"/>
+          <label style="font-size:12.5px;color:var(--ink-soft)">הספקת עד כה: <b>${w.pagesDone}</b> מתוך ${w.notePages} · כמה עמודים הספקת עכשיו?</label>
+          <input type="number" placeholder="עמ'" style="width:80px" class="s2today-input" data-key="${w.key}"/>
+          <button class="btn small s2today-add">הוסף</button>
         </div>
       </div>
     `);
-    item.querySelector('.s2today-input').onchange = (e)=>{
-      const v = Math.max(0, Math.min(w.notePages, Number(e.target.value)||0));
-      if(!confirmEntry(`${BOOK_META[w.book].label} פרק ${w.ch}`, w.pagesDone||0, v, a.pages)){ render(); return; }
+    const s2inp = item.querySelector('.s2today-input');
+    const s2submit = ()=>{
+      const add = Math.round(Number(s2inp.value)||0);
+      if(!add) return;
+      const old = w.pagesDone||0;
+      const v = Math.max(0, Math.min(w.notePages, old + add));
+      if(v===old){ s2inp.value=''; return; }
+      if(!confirmEntry(`${BOOK_META[w.book].label} פרק ${w.ch}`, old, v, a.pages)){ s2inp.value=''; return; }
       applyS2(w, v);
       saveState(); render();
     };
+    s2inp.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); s2submit(); } });
+    item.querySelector('.s2today-add').onclick = s2submit;
     list.appendChild(item);
   });
 
