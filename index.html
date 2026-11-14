@@ -446,17 +446,17 @@ function saveState(){
    PROGRESS ENTRY LOG + SAFE ENTRY (prevents accidental double entry)
    ============================================================ */
 function unitTotal(key){ const u=UNITS.find(x=>x.key===key); return u?u.pages:Infinity; }
-function logEntry(scope,key,label,from,to){
+function logEntry(scope,key,label,from,to,date){
   if(!STATE.entryLog) STATE.entryLog=[];
-  STATE.entryLog.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,5), ts:Date.now(), date:todayStr(), scope, key, label, delta:to-from});
+  STATE.entryLog.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,5), ts:Date.now(), date:date||todayStr(), scope, key, label, delta:to-from});
   if(STATE.entryLog.length>500) STATE.entryLog.splice(0, STATE.entryLog.length-500);
 }
 function s1Label(key){ const u=UNITS.find(x=>x.key===key); return u? `${BOOK_META[u.book].label} פרק ${u.ch}` : key; }
-function applyS1(key,newVal){
+function applyS1(key,newVal,date){
   const old=STATE.unitProgress[key]||0;
   const v=Math.max(0,Math.min(unitTotal(key),Number(newVal)||0));
   if(v===old) return false;
-  STATE.unitProgress[key]=v; logEntry('s1',key,s1Label(key),old,v); return true;
+  STATE.unitProgress[key]=v; logEntry('s1',key,s1Label(key),old,v,date); return true;
 }
 function applyS2(w,newVal){
   const old=w.pagesDone||0;
@@ -487,12 +487,12 @@ function undoEntry(id){
   if(e.scope==='s2') stage2LogSnapshot();
   saveState(); render();
 }
-function renderEntryLogCard(){
-  const today=todayStr();
+function renderEntryLogCard(forDate,title){
+  const today=forDate||todayStr();
   const items=(STATE.entryLog||[]).filter(e=>e.date===today).slice().reverse();
-  const card=el(`<div class="card"><h2>הזנות של היום</h2><div class="hint">טעית? לחץ "בטל" כדי להחזיר את ההזנה.</div><div class="assign-list" id="entry-log"></div></div>`);
+  const card=el(`<div class="card"><h2>${title||'הזנות של היום'}</h2><div class="hint">טעית? לחץ "בטל" כדי להחזיר את ההזנה.</div><div class="assign-list" id="entry-log"></div></div>`);
   const box=card.querySelector('#entry-log');
-  if(!items.length){ box.appendChild(el(`<div class="empty-note">עוד לא הוזנו עמודים היום.</div>`)); return card; }
+  if(!items.length){ box.appendChild(el(`<div class="empty-note">לא הוזנו עמודים ביום הזה.</div>`)); return card; }
   items.forEach(e=>{
     const t=new Date(e.ts); const hh=String(t.getHours()).padStart(2,'0')+':'+String(t.getMinutes()).padStart(2,'0');
     const row=el(`<div class="assign-item"><div class="assign-controls"><span style="font-size:13px">${hh} · ${e.label} · <b>${e.delta>0?'+':''}${e.delta}</b> עמ'</span><button class="btn small secondary" style="margin-inline-start:auto">בטל</button></div></div>`);
@@ -1051,6 +1051,52 @@ function render(){
 }
 
 /* ---------- TODAY TAB ---------- */
+
+/* ---------- RETROACTIVE LOGGING (stage 1) ---------- */
+const RETRO = {date:null, unitKey:null};
+function renderRetroCard(){
+  const today=todayStr();
+  if(!RETRO.date) RETRO.date=addDays(today,-1);
+  const units=UNITS.filter(u=>u.phase===1);
+  if(!RETRO.unitKey) RETRO.unitKey=units[0].key;
+  const opts=units.map(u=>{const d=STATE.unitProgress[u.key]||0;return `<option value="${u.key}" ${u.key===RETRO.unitKey?'selected':''}>${BOOK_META[u.book].label} פרק ${u.ch}: ${u.name} (${d}/${u.pages})</option>`;}).join('');
+  const log=STATE.dailyLog[RETRO.date]||{};
+  const card=el(`
+    <div class="card">
+      <h2>תיעוד רטרואקטיבי</h2>
+      <div class="hint">שכחת לתעד יום קודם? בחר תאריך, פרק וכמה עמודים קראת באותו יום. העמודים מתווספים להתקדמות והתוכנית מתעדכנת.</div>
+      <div class="assign-controls" style="flex-wrap:wrap;gap:8px">
+        <input type="date" id="retro-date" value="${RETRO.date}" max="${today}"/>
+        <select id="retro-unit" style="max-width:100%">${opts}</select>
+        <input type="number" id="retro-pages" min="1" placeholder="עמודים באותו יום" style="width:130px"/>
+        <button class="btn small" id="retro-add">הוסף</button>
+      </div>
+      <div class="daily-fixed" style="margin-top:10px">
+        <div class="fixed-item"><input type="checkbox" id="retro-practice" ${log.practice?'checked':''}/><label for="retro-practice">תרגול שאלות בוצע באותו יום</label></div>
+        <div class="fixed-item"><input type="checkbox" id="retro-anki" ${log.anki?'checked':''}/><label for="retro-anki">כרטיסיות אנקי בוצעו באותו יום</label></div>
+      </div>
+    </div>`);
+  card.querySelector('#retro-date').onchange=e=>{ RETRO.date=e.target.value||RETRO.date; render(); };
+  card.querySelector('#retro-unit').onchange=e=>{ RETRO.unitKey=e.target.value; };
+  card.querySelector('#retro-add').onclick=()=>{
+    const key=card.querySelector('#retro-unit').value;
+    const add=Math.floor(Number(card.querySelector('#retro-pages').value)||0);
+    if(RETRO.date>today){ alert('אי אפשר לתעד תאריך עתידי'); return; }
+    if(add<=0) return;
+    const old=STATE.unitProgress[key]||0;
+    const v=Math.min(unitTotal(key),old+add);
+    if(v===old){ alert('הפרק כבר הושלם'); return; }
+    if(!confirm(`${s1Label(key)}: להוסיף ${v-old} עמ' לתאריך ${RETRO.date} (סה"כ ${v})?`)) return;
+    RETRO.unitKey=key;
+    applyS1(key,v,RETRO.date);
+    saveState(); render();
+  };
+  card.querySelector('#retro-practice').onchange=e=>{ STATE.dailyLog[RETRO.date]={...(STATE.dailyLog[RETRO.date]||{}),practice:e.target.checked}; saveState(); };
+  card.querySelector('#retro-anki').onchange=e=>{ STATE.dailyLog[RETRO.date]={...(STATE.dailyLog[RETRO.date]||{}),anki:e.target.checked}; saveState(); };
+  card.appendChild(renderEntryLogCard(RETRO.date,`הזנות בתאריך ${RETRO.date}`));
+  return card;
+}
+
 function renderToday(schedule){
   const wrap = el(`<div class="tab-panel active"></div>`);
   const today = todayStr();
@@ -1196,6 +1242,7 @@ function renderToday(schedule){
 
   wrap.appendChild(card);
   wrap.appendChild(fixedCard);
+  wrap.appendChild(renderRetroCard());
   return wrap;
 }
 
