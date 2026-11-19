@@ -646,12 +646,26 @@ function remainingPages(u){
 
 // Runs the day-by-day scheduling loop for a given ordered queue of units. Shared by the normal
 // simulate() pass and the "dry run" pass used to detect department-exam scheduling conflicts.
+// Hours already spent today (from today's logged entries), so that logging progress does not
+// make the app hand out a fresh full day of work again.
+function hoursDoneToday(){
+  const today=todayStr(), byKey={};
+  (STATE.entryLog||[]).forEach(e=>{ if(e.scope==='s1' && e.date===today) byKey[e.key]=(byKey[e.key]||0)+e.delta; });
+  let h=0;
+  Object.keys(byKey).forEach(k=>{
+    const pages=Math.max(0,byKey[k]); const u=UNITS.find(x=>x.key===k);
+    if(u && pages>0) h+=pages/rateForUnit(u);
+  });
+  return h;
+}
+
 function runQueueSchedule(queue, startDate, maxDays){
   const schedule = [];
   let qi = 0, date = startDate, dayCount = 0, finishDate = null;
   while(qi < queue.length && dayCount < maxDays){
     const type = getDayType(date);
     let hoursBudget = netStudyHours(date, type);
+    if(date===todayStr()) hoursBudget = Math.max(0, hoursBudget - hoursDoneToday());
     const assignments = [];
     let hoursUsed = 0;
     while(hoursBudget > 0.001 && qi < queue.length){
@@ -858,13 +872,16 @@ function stage2LogSnapshot(){
 // actual available hours (respecting oncall/after/research overrides already in the system).
 // Falls back to STAGE2_DEFAULT_RATE until there are at least two distinct data points.
 function stage2EffectiveRate(){
-  const log = STATE.stage2.progressLog;
+  // Only completed days count (today's partial progress would understate the pace and make the
+  // plan jump around while you work). Each snapshot is the cumulative total at the end of its day.
+  const todayS = todayStr();
+  const log = STATE.stage2.progressLog.filter(e=>e.date < todayS);
   if(log.length < 2) return { rate: STAGE2_DEFAULT_RATE, isReal: false, daysOfData: log.length };
   const first = log[0], last = log[log.length-1];
   const pagesDelta = last.totalPages - first.totalPages;
   if(pagesDelta <= 0) return { rate: STAGE2_DEFAULT_RATE, isReal: false, daysOfData: log.length };
   let hoursSum = 0;
-  let d = first.date;
+  let d = addDays(first.date, 1); // baseline is the end of the first logged day
   while(d <= last.date){
     hoursSum += netStudyHours(d, getDayType(d));
     d = addDays(d, 1);
@@ -911,6 +928,13 @@ function stage2SuggestedExamCount(){
 // skipping exam-blocked days entirely (0 hours), respecting the same day-type system as stage 1.
 // Weak chapters are processed highest-ROI-first, so the most exam-relevant material gets covered
 // earliest - which matters most if time runs short before the final review window.
+function stage2HoursDoneToday(rate){
+  const today=todayStr(), byKey={};
+  (STATE.entryLog||[]).forEach(e=>{ if(e.scope==='s2' && e.date===today) byKey[e.key]=(byKey[e.key]||0)+e.delta; });
+  let pages=0; Object.keys(byKey).forEach(k=>{ pages+=Math.max(0,byKey[k]); });
+  return rate>0 ? pages/rate : 0;
+}
+
 function simulateStage2(maxDays=400){
   const remaining = STATE.stage2.weakChapters
     .map(w=>{
@@ -940,6 +964,7 @@ function simulateStage2(maxDays=400){
     const isExamDay = examBlocks.has(date);
     const type = getDayType(date);
     let hoursBudget = isExamDay ? 0 : netStudyHours(date, type);
+    if(date===today && !isExamDay) hoursBudget = Math.max(0, hoursBudget - stage2HoursDoneToday(rate));
     const assignments = [];
     while(hoursBudget > 0.001 && qi < queue.length){
       const w = queue[qi];
@@ -1229,7 +1254,7 @@ function renderToday(schedule){
 
   const list = card.querySelector('#assign-list');
   if(!day.assignments.length){
-    list.appendChild(el(`<div class="empty-note">אין משימות קריאה ליום זה.</div>`));
+    list.appendChild(el(`<div class="empty-note">${day.date===today && hoursDoneToday()>0 ? 'השלמת את תקציב הלמידה להיום 🎉 (הזנות היום ב"הזנות של היום" למטה)' : 'אין משימות קריאה ליום זה.'}</div>`));
   }
   day.assignments.forEach(a=>{
     const meta = BOOK_META[a.book];
